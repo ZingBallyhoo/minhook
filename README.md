@@ -1,3 +1,7 @@
+# Zingy's fork
+
+This fork adds supports for a function being hooked multiple times from one minhook instance, by different modules. This means that different DLLs can hook the same functions with no collisions. Hook disabling may not work, completely untested.
+
 # About the `multihook` branch
 
 This branch supports hooking the same function from multiple instances of MinHook. In addition to the new enhancement, it has a couple of new limitations:

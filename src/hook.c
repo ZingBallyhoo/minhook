@@ -61,9 +61,9 @@ typedef struct _FROZEN_THREADS
 
 // Function and function pointer declarations.
 typedef MH_STATUS(WINAPI *ENABLE_HOOK_LL_PROC)(UINT pos, BOOL enable, PFROZEN_THREADS pThreads);
-typedef MH_STATUS(WINAPI *DISABLE_HOOK_CHAIN_PROC)(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
+typedef MH_STATUS(WINAPI *DISABLE_HOOK_CHAIN_PROC)(HMODULE hOwningModule, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
 
-static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
+static MH_STATUS WINAPI DisableHookChain(HMODULE hOwningModule, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
 
 #pragma pack(push, 1)
 
@@ -83,6 +83,8 @@ typedef struct _HOOK_ENTRY
     LPVOID pTarget;             // Address of the target function.
     LPVOID pDetour;             // Address of the detour function.
     PEXEC_BUFFER pExecBuffer;   // Address of the executable buffer for relay and trampoline.
+
+    HMODULE hOwningModule;
 
     UINT8  isEnabled   : 1;     // Enabled.
     UINT8  queueEnable : 1;     // Queued for enabling/disabling when != isEnabled.
@@ -114,12 +116,12 @@ struct
 
 //-------------------------------------------------------------------------
 // Returns INVALID_HOOK_POS if not found.
-static UINT FindHookEntry(LPVOID pTarget)
+static UINT FindHookEntry(HMODULE hOwningModule, LPVOID pTarget)
 {
     UINT i;
     for (i = 0; i < g_hooks.size; ++i)
     {
-        if ((ULONG_PTR)pTarget == (ULONG_PTR)g_hooks.pItems[i].pTarget)
+        if ((ULONG_PTR)pTarget == (ULONG_PTR)g_hooks.pItems[i].pTarget && hOwningModule == g_hooks.pItems[i].hOwningModule)
             return i;
     }
 
@@ -389,7 +391,7 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
             if (&pHook->pExecBuffer->jmpRelay != pJmpRelay)
             {
                 PEXEC_BUFFER pOtherExecBuffer = (PEXEC_BUFFER)((LPBYTE)pJmpRelay - offsetof(EXEC_BUFFER, jmpRelay));
-                return pOtherExecBuffer->pDisableHookChain(pHook->pTarget, pos, EnableHookLL, pThreads);
+                return pOtherExecBuffer->pDisableHookChain(pHook->hOwningModule, pHook->pTarget, pos, EnableHookLL, pThreads);
             }
         }
     }
@@ -568,7 +570,7 @@ MH_STATUS WINAPI MH_Uninitialize(VOID)
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
+MH_STATUS WINAPI MH_CreateHook(HMODULE hOwningModule, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -580,7 +582,7 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 
     if (IsExecutableAddress(pTarget) && IsExecutableAddress(pDetour))
     {
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hOwningModule, pTarget);
         if (pos == INVALID_HOOK_POS)
         {
             PEXEC_BUFFER pBuffer = AllocateBuffer(pTarget);
@@ -595,6 +597,7 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
                     pHook->pTarget = pTarget;
                     pHook->pDetour = pDetour;
                     pHook->pExecBuffer = pBuffer;
+                    pHook->hOwningModule = hOwningModule;
                     pHook->isEnabled = FALSE;
                     pHook->queueEnable = FALSE;
 
@@ -632,7 +635,7 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_RemoveHook(HMODULE hOwningModule, LPVOID pTarget)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -642,7 +645,7 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 
     MH_STATUS status = MH_OK;
 
-    UINT pos = FindHookEntry(pTarget);
+    UINT pos = FindHookEntry(hOwningModule, pTarget);
     if (pos != INVALID_HOOK_POS)
     {
         if (g_hooks.pItems[pos].isEnabled)
@@ -672,12 +675,12 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
+static MH_STATUS WINAPI DisableHookChain(HMODULE hOwningModule, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
 {
     UINT pos;
     MH_STATUS status;
 
-    pos = FindHookEntry(pTarget);
+    pos = FindHookEntry(hOwningModule, pTarget);
     if (pos == INVALID_HOOK_POS)
         return MH_ERROR_NOT_CREATED;
 
@@ -699,7 +702,7 @@ static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
+static MH_STATUS EnableHook(HMODULE hOwningModule, LPVOID pTarget, BOOL enable)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -716,7 +719,7 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
     else
     {
         FROZEN_THREADS threads;
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hOwningModule, pTarget);
         if (pos != INVALID_HOOK_POS)
         {
             if (g_hooks.pItems[pos].isEnabled != enable)
@@ -744,19 +747,19 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_EnableHook(HMODULE hOwningModule, LPVOID pTarget)
 {
-    return EnableHook(pTarget, TRUE);
+    return EnableHook(hOwningModule, pTarget, TRUE);
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_DisableHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_DisableHook(HMODULE hOwningModule, LPVOID pTarget)
 {
-    return EnableHook(pTarget, FALSE);
+    return EnableHook(hOwningModule, pTarget, FALSE);
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
+static MH_STATUS QueueHook(HMODULE hOwningModule, LPVOID pTarget, BOOL queueEnable)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -774,7 +777,7 @@ static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
     }
     else
     {
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hOwningModule, pTarget);
         if (pos != INVALID_HOOK_POS)
         {
             g_hooks.pItems[pos].queueEnable = queueEnable;
@@ -791,15 +794,15 @@ static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_QueueEnableHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_QueueEnableHook(HMODULE hOwningModule, LPVOID pTarget)
 {
-    return QueueHook(pTarget, TRUE);
+    return QueueHook(hOwningModule, pTarget, TRUE);
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_QueueDisableHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_QueueDisableHook(HMODULE hOwningModule, LPVOID pTarget)
 {
-    return QueueHook(pTarget, FALSE);
+    return QueueHook(hOwningModule, pTarget, FALSE);
 }
 
 //-------------------------------------------------------------------------
@@ -849,7 +852,7 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
 
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_CreateHookApiEx(
-    LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour,
+    HMODULE hOwningModule, LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour,
     LPVOID *ppOriginal, LPVOID *ppTarget)
 {
     HMODULE hModule;
@@ -866,14 +869,14 @@ MH_STATUS WINAPI MH_CreateHookApiEx(
     if(ppTarget != NULL)
         *ppTarget = pTarget;
 
-    return MH_CreateHook(pTarget, pDetour, ppOriginal);
+    return MH_CreateHook(hOwningModule, pTarget, pDetour, ppOriginal);
 }
 
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_CreateHookApi(
-    LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal)
+    HMODULE hOwningModule, LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal)
 {
-   return MH_CreateHookApiEx(pszModule, pszProcName, pDetour, ppOriginal, NULL);
+   return MH_CreateHookApiEx(hOwningModule, pszModule, pszProcName, pDetour, ppOriginal, NULL);
 }
 
 //-------------------------------------------------------------------------
